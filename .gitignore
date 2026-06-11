@@ -1,0 +1,43 @@
+# Build directories
+/build*/
+/bin/
+/lib/
+
+# qmake / Makefile outputs
+/.qmake.stash
+/Makefile
+/Makefile.Debug
+/Makefile.Release
+**/Makefile
+**/Makefile.Debug
+**/Makefile.Release
+**/.qmake.stash
+
+# Qt generated files
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+moc_predefs.h
+
+# Compiler outputs
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.exp
+*.ilk
+*.pdb
+*.idb
+
+# IDE / OS files
+.directory
+.DS_Store
+Thumbs.db
+*.user
+*.suo
+*.vcxproj.user

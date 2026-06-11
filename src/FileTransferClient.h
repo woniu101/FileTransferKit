@@ -1,0 +1,76 @@
+#ifndef FILETRANSFERCLIENT_H
+#define FILETRANSFERCLIENT_H
+
+#include <QObject>
+#include <QString>
+#include <QByteArray>
+
+class QFtp;
+
+class FileTransferClient : public QObject
+{
+    Q_OBJECT
+public:
+    enum Protocol { Ftp, Sftp };
+    enum FileNameEncoding { Utf8FileNameEncoding, GbkFileNameEncoding };
+
+    explicit FileTransferClient(QObject *parent = 0);
+    ~FileTransferClient();
+
+    void setProtocol(Protocol protocol);
+    Protocol protocol() const;
+
+    void setHost(const QString &host);
+    void setPort(quint16 port);
+    void setUserName(const QString &userName);
+    void setPassword(const QString &password);
+    void setTimeoutMs(int timeoutMs);
+    void setFileNameEncoding(FileNameEncoding encoding);
+    void setFileNameCodecName(const QByteArray &codecName);
+
+    void setConnectionInfo(Protocol protocol, const QString &host, quint16 port,
+        const QString &userName, const QString &password);
+
+    bool uploadFile(const QString &localPath, const QString &remotePath);
+    bool downloadFile(const QString &remotePath, const QString &localPath);
+    bool removeFile(const QString &remotePath);
+    void close();
+
+    QString errorString() const;
+
+signals:
+    void progress(qint64 done, qint64 total);
+    void connected();
+    void operationFinished(bool ok, const QString &error);
+
+private:
+    bool ftpUploadFile(const QString &localPath, const QString &remotePath);
+    bool ftpDownloadFile(const QString &remotePath, const QString &localPath);
+    bool ftpRemoveFile(const QString &remotePath);
+    bool ensureFtpConnected();
+    bool waitForFtpCommand(int commandId, const QString &defaultError);
+    void closeFtpAfterOperation();
+    void destroyFtp(bool abortTransfer);
+
+    bool sftpUploadFile(const QString &localPath, const QString &remotePath);
+    bool sftpDownloadFile(const QString &remotePath, const QString &localPath);
+    bool sftpRemoveFile(const QString &remotePath);
+    bool runSftpFileJob(const QString &localPath, const QString &remotePath, int operation);
+
+    QString encodeFtpString(const QString &input) const;
+    void setError(const QString &error);
+    void finishOperation(bool ok);
+    quint16 effectivePort() const;
+
+    Protocol m_protocol;
+    QString m_host;
+    quint16 m_port;
+    QString m_userName;
+    QString m_password;
+    int m_timeoutMs;
+    QByteArray m_fileNameCodecName;
+    QString m_errorString;
+    QFtp *m_ftp;
+};
+
+#endif // FILETRANSFERCLIENT_H
