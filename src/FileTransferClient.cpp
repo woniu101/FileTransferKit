@@ -1,6 +1,7 @@
 #include "FileTransferClient.h"
 
 #include "qftp.h"
+#include "qurlinfo.h"
 #include "ssh/sftpchannel.h"
 #include "ssh/sshconnection.h"
 
@@ -18,8 +19,41 @@ const quint16 DefaultSftpPort = 22;
 enum SftpOperation {
     SftpUploadOperation,
     SftpDownloadOperation,
-    SftpRemoveOperation
+    SftpRemoveOperation,
+    SftpListDirectoryOperation,
+    SftpCreateDirectoryOperation,
+    SftpRemoveDirectoryOperation,
+    SftpRenameOperation
 };
+
+QString remotePathJoin(const QString &directory, const QString &name)
+{
+    if (directory.isEmpty())
+        return name;
+    if (directory == QLatin1String("/"))
+        return directory + name;
+    return directory.endsWith(QLatin1Char('/'))
+        ? directory + name : directory + QLatin1Char('/') + name;
+}
+
+QString remoteParentPath(const QString &path)
+{
+    const int slash = path.lastIndexOf(QLatin1Char('/'));
+    if (slash < 0)
+        return QString();
+    if (slash == 0)
+        return QLatin1String("/");
+    return path.left(slash);
+}
+
+QString remoteBaseName(const QString &path)
+{
+    QString normalized = path;
+    while (normalized.length() > 1 && normalized.endsWith(QLatin1Char('/')))
+        normalized.chop(1);
+    const int slash = normalized.lastIndexOf(QLatin1Char('/'));
+    return slash < 0 ? normalized : normalized.mid(slash + 1);
+}
 }
 
 FileTransferClient::FileTransferClient(QObject *parent)
@@ -122,6 +156,49 @@ bool FileTransferClient::removeFile(const QString &remotePath)
     return ok;
 }
 
+QList<FileTransferEntry> FileTransferClient::listDirectory(const QString &remotePath)
+{
+    m_errorString.clear();
+    QList<FileTransferEntry> entries;
+    const bool ok = m_protocol == Ftp
+        ? ftpListDirectory(remotePath, &entries) : sftpListDirectory(remotePath, &entries);
+    finishOperation(ok);
+    return ok ? entries : QList<FileTransferEntry>();
+}
+
+bool FileTransferClient::createDirectory(const QString &remotePath)
+{
+    m_errorString.clear();
+    const bool ok = m_protocol == Ftp ? ftpCreateDirectory(remotePath) : sftpCreateDirectory(remotePath);
+    finishOperation(ok);
+    return ok;
+}
+
+bool FileTransferClient::removeDirectory(const QString &remotePath)
+{
+    m_errorString.clear();
+    const bool ok = m_protocol == Ftp ? ftpRemoveDirectory(remotePath) : sftpRemoveDirectory(remotePath);
+    finishOperation(ok);
+    return ok;
+}
+
+bool FileTransferClient::rename(const QString &oldRemotePath, const QString &newRemotePath)
+{
+    m_errorString.clear();
+    const bool ok = m_protocol == Ftp
+        ? ftpRename(oldRemotePath, newRemotePath) : sftpRename(oldRemotePath, newRemotePath);
+    finishOperation(ok);
+    return ok;
+}
+
+bool FileTransferClient::fileExists(const QString &remotePath)
+{
+    m_errorString.clear();
+    const bool exists = m_protocol == Ftp ? ftpFileExists(remotePath) : sftpFileExists(remotePath);
+    finishOperation(exists);
+    return exists;
+}
+
 void FileTransferClient::close()
 {
     destroyFtp(true);
@@ -139,8 +216,10 @@ bool FileTransferClient::ftpUploadFile(const QString &localPath, const QString &
         return setError(QString::fromLatin1("Local file does not exist: %1").arg(localPath)), false;
     if (!localFile.open(QIODevice::ReadOnly))
         return setError(QString::fromLatin1("Cannot open local file: %1").arg(localFile.errorString())), false;
-    if (!ensureFtpConnected())
+    if (!ensureFtpConnected()) {
+        close();
         return false;
+    }
     const int commandId = m_ftp->put(&localFile, encodeFtpString(remotePath), QFtp::Binary);
     const bool ok = waitForFtpCommand(commandId, QString::fromLatin1("FTP upload failed."));
     closeFtpAfterOperation();
@@ -152,8 +231,10 @@ bool FileTransferClient::ftpDownloadFile(const QString &remotePath, const QStrin
     QFile localFile(localPath);
     if (!localFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return setError(QString::fromLatin1("Cannot open local file: %1").arg(localFile.errorString())), false;
-    if (!ensureFtpConnected())
+    if (!ensureFtpConnected()) {
+        close();
         return false;
+    }
     const int commandId = m_ftp->get(encodeFtpString(remotePath), &localFile, QFtp::Binary);
     const bool ok = waitForFtpCommand(commandId, QString::fromLatin1("FTP download failed."));
     closeFtpAfterOperation();
@@ -162,12 +243,94 @@ bool FileTransferClient::ftpDownloadFile(const QString &remotePath, const QStrin
 
 bool FileTransferClient::ftpRemoveFile(const QString &remotePath)
 {
-    if (!ensureFtpConnected())
+    if (!ensureFtpConnected()) {
+        close();
         return false;
+    }
     const int commandId = m_ftp->remove(encodeFtpString(remotePath));
     const bool ok = waitForFtpCommand(commandId, QString::fromLatin1("FTP remove failed."));
     closeFtpAfterOperation();
     return ok;
+}
+
+bool FileTransferClient::ftpListDirectory(const QString &remotePath, QList<FileTransferEntry> *entries)
+{
+    if (!ensureFtpConnected()) {
+        close();
+        return false;
+    }
+
+    QMetaObject::Connection listConnection = connect(m_ftp, &QFtp::listInfo,
+        this, [&](const QUrlInfo &info) {
+            if (info.name() == QLatin1String(".") || info.name() == QLatin1String(".."))
+                return;
+            FileTransferEntry entry;
+            entry.name = decodeFtpString(info.name());
+            entry.path = remotePathJoin(remotePath, entry.name);
+            entry.isDirectory = info.isDir();
+            entry.size = info.size();
+            entries->append(entry);
+        });
+    const int commandId = m_ftp->list(encodeFtpString(remotePath));
+    const bool ok = waitForFtpCommand(commandId, QString::fromLatin1("FTP list directory failed."));
+    disconnect(listConnection);
+    closeFtpAfterOperation();
+    return ok;
+}
+
+bool FileTransferClient::ftpCreateDirectory(const QString &remotePath)
+{
+    if (!ensureFtpConnected()) {
+        close();
+        return false;
+    }
+    const int commandId = m_ftp->mkdir(encodeFtpString(remotePath));
+    const bool ok = waitForFtpCommand(commandId, QString::fromLatin1("FTP create directory failed."));
+    closeFtpAfterOperation();
+    return ok;
+}
+
+bool FileTransferClient::ftpRemoveDirectory(const QString &remotePath)
+{
+    if (!ensureFtpConnected()) {
+        close();
+        return false;
+    }
+    const int commandId = m_ftp->rmdir(encodeFtpString(remotePath));
+    const bool ok = waitForFtpCommand(commandId, QString::fromLatin1("FTP remove directory failed."));
+    closeFtpAfterOperation();
+    return ok;
+}
+
+bool FileTransferClient::ftpRename(const QString &oldRemotePath, const QString &newRemotePath)
+{
+    if (!ensureFtpConnected()) {
+        close();
+        return false;
+    }
+    const int commandId = m_ftp->rename(encodeFtpString(oldRemotePath), encodeFtpString(newRemotePath));
+    const bool ok = waitForFtpCommand(commandId, QString::fromLatin1("FTP rename failed."));
+    closeFtpAfterOperation();
+    return ok;
+}
+
+bool FileTransferClient::ftpFileExists(const QString &remotePath)
+{
+    const QString name = remoteBaseName(remotePath);
+    if (name.isEmpty()) {
+        setError(QString::fromLatin1("Remote path is empty."));
+        return false;
+    }
+
+    QList<FileTransferEntry> entries;
+    if (!ftpListDirectory(remoteParentPath(remotePath), &entries))
+        return false;
+    foreach (const FileTransferEntry &entry, entries) {
+        if (entry.name == name)
+            return true;
+    }
+    setError(QString::fromLatin1("Remote path does not exist: %1").arg(remotePath));
+    return false;
 }
 
 bool FileTransferClient::ensureFtpConnected()
@@ -236,11 +399,11 @@ void FileTransferClient::closeFtpAfterOperation()
     if (!m_ftp)
         return;
 
-    if (m_ftp->state() != QFtp::Unconnected) {
-        const int closeId = m_ftp->close();
-        waitForFtpCommand(closeId, QString::fromLatin1("FTP close failed."));
-    }
-    destroyFtp(false);
+    // Keep an authenticated FTP control connection for consecutive operations.
+    // Reconnecting immediately after a QUIT can make the legacy QFtp data socket
+    // fail intermittently against FileZilla Server.
+    if (m_ftp->state() == QFtp::Unconnected)
+        destroyFtp(false);
 }
 
 void FileTransferClient::destroyFtp(bool abortTransfer)
@@ -270,8 +433,53 @@ bool FileTransferClient::sftpRemoveFile(const QString &remotePath)
     return runSftpFileJob(QString(), remotePath, SftpRemoveOperation);
 }
 
+bool FileTransferClient::sftpListDirectory(const QString &remotePath, QList<FileTransferEntry> *entries)
+{
+    return runSftpOperation(QString(), remotePath, SftpListDirectoryOperation, entries);
+}
+
+bool FileTransferClient::sftpCreateDirectory(const QString &remotePath)
+{
+    return runSftpOperation(QString(), remotePath, SftpCreateDirectoryOperation, 0);
+}
+
+bool FileTransferClient::sftpRemoveDirectory(const QString &remotePath)
+{
+    return runSftpOperation(QString(), remotePath, SftpRemoveDirectoryOperation, 0);
+}
+
+bool FileTransferClient::sftpRename(const QString &oldRemotePath, const QString &newRemotePath)
+{
+    return runSftpOperation(oldRemotePath, newRemotePath, SftpRenameOperation, 0);
+}
+
+bool FileTransferClient::sftpFileExists(const QString &remotePath)
+{
+    const QString name = remoteBaseName(remotePath);
+    if (name.isEmpty()) {
+        setError(QString::fromLatin1("Remote path is empty."));
+        return false;
+    }
+
+    QList<FileTransferEntry> entries;
+    if (!sftpListDirectory(remoteParentPath(remotePath), &entries))
+        return false;
+    foreach (const FileTransferEntry &entry, entries) {
+        if (entry.name == name)
+            return true;
+    }
+    setError(QString::fromLatin1("Remote path does not exist: %1").arg(remotePath));
+    return false;
+}
+
 bool FileTransferClient::runSftpFileJob(const QString &localPath, const QString &remotePath,
     int operation)
+{
+    return runSftpOperation(localPath, remotePath, operation, 0);
+}
+
+bool FileTransferClient::runSftpOperation(const QString &firstPath, const QString &secondPath,
+    int operation, QList<FileTransferEntry> *entries)
 {
     QSsh::SshConnectionParameters params;
     params.host = m_host;
@@ -314,13 +522,25 @@ bool FileTransferClient::runSftpFileJob(const QString &localPath, const QString 
             emit connected();
             switch (operation) {
             case SftpUploadOperation:
-                jobId = channel->uploadFile(localPath, remotePath, QSsh::SftpOverwriteExisting);
+                jobId = channel->uploadFile(firstPath, secondPath, QSsh::SftpOverwriteExisting);
                 break;
             case SftpDownloadOperation:
-                jobId = channel->downloadFile(remotePath, localPath, QSsh::SftpOverwriteExisting);
+                jobId = channel->downloadFile(secondPath, firstPath, QSsh::SftpOverwriteExisting);
                 break;
             case SftpRemoveOperation:
-                jobId = channel->removeFile(remotePath);
+                jobId = channel->removeFile(secondPath);
+                break;
+            case SftpListDirectoryOperation:
+                jobId = channel->listDirectory(secondPath);
+                break;
+            case SftpCreateDirectoryOperation:
+                jobId = channel->createDirectory(secondPath);
+                break;
+            case SftpRemoveDirectoryOperation:
+                jobId = channel->removeDirectory(secondPath);
+                break;
+            case SftpRenameOperation:
+                jobId = channel->renameFileOrDirectory(firstPath, secondPath);
                 break;
             }
             if (jobId == QSsh::SftpInvalidJob) {
@@ -334,6 +554,21 @@ bool FileTransferClient::runSftpFileJob(const QString &localPath, const QString 
             done = true;
             loop.quit();
         });
+        connect(channel.data(), &QSsh::SftpChannel::fileInfoAvailable, this,
+            [&](QSsh::SftpJobId infoJob, const QList<QSsh::SftpFileInfo> &fileInfoList) {
+                if (!entries || infoJob != jobId)
+                    return;
+                foreach (const QSsh::SftpFileInfo &fileInfo, fileInfoList) {
+                    if (fileInfo.name == QLatin1String(".") || fileInfo.name == QLatin1String(".."))
+                        continue;
+                    FileTransferEntry entry;
+                    entry.name = fileInfo.name;
+                    entry.path = remotePathJoin(secondPath, entry.name);
+                    entry.isDirectory = fileInfo.type == QSsh::FileTypeDirectory;
+                    entry.size = fileInfo.sizeValid ? qint64(fileInfo.size) : -1;
+                    entries->append(entry);
+                }
+            });
         connect(channel.data(), &QSsh::SftpChannel::finished, this,
             [&](QSsh::SftpJobId finishedJob, const QString &error) {
                 if (finishedJob != jobId)
@@ -374,6 +609,24 @@ QString FileTransferClient::encodeFtpString(const QString &input) const
     if (!codec)
         codec = QTextCodec::codecForName("UTF-8");
     return QString::fromLatin1(codec->fromUnicode(input));
+}
+
+QString FileTransferClient::decodeFtpString(const QString &input) const
+{
+    const QByteArray bytes = input.toLatin1();
+    QTextCodec *utf8Codec = QTextCodec::codecForName("UTF-8");
+    if (utf8Codec && QString::fromLatin1(m_fileNameCodecName)
+        .compare(QLatin1String("UTF-8"), Qt::CaseInsensitive) != 0) {
+        QTextCodec::ConverterState state;
+        const QString utf8Value = utf8Codec->toUnicode(bytes.constData(), bytes.size(), &state);
+        if (state.invalidChars == 0)
+            return utf8Value;
+    }
+
+    QTextCodec *codec = QTextCodec::codecForName(m_fileNameCodecName);
+    if (!codec)
+        codec = utf8Codec;
+    return codec ? codec->toUnicode(bytes) : QString::fromUtf8(bytes);
 }
 
 void FileTransferClient::setError(const QString &error)

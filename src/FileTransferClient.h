@@ -2,10 +2,25 @@
 #define FILETRANSFERCLIENT_H
 
 #include <QObject>
+#include <QList>
 #include <QString>
 #include <QByteArray>
 
 class QFtp;
+
+struct FileTransferEntry
+{
+    FileTransferEntry()
+        : isDirectory(false),
+          size(-1)
+    {
+    }
+
+    QString name;
+    QString path;
+    bool isDirectory;
+    qint64 size;
+};
 
 class FileTransferClient : public QObject
 {
@@ -34,6 +49,11 @@ public:
     bool uploadFile(const QString &localPath, const QString &remotePath);
     bool downloadFile(const QString &remotePath, const QString &localPath);
     bool removeFile(const QString &remotePath);
+    QList<FileTransferEntry> listDirectory(const QString &remotePath);
+    bool createDirectory(const QString &remotePath);
+    bool removeDirectory(const QString &remotePath);
+    bool rename(const QString &oldRemotePath, const QString &newRemotePath);
+    bool fileExists(const QString &remotePath);
     void close();
 
     QString errorString() const;
@@ -47,6 +67,11 @@ private:
     bool ftpUploadFile(const QString &localPath, const QString &remotePath);
     bool ftpDownloadFile(const QString &remotePath, const QString &localPath);
     bool ftpRemoveFile(const QString &remotePath);
+    bool ftpListDirectory(const QString &remotePath, QList<FileTransferEntry> *entries);
+    bool ftpCreateDirectory(const QString &remotePath);
+    bool ftpRemoveDirectory(const QString &remotePath);
+    bool ftpRename(const QString &oldRemotePath, const QString &newRemotePath);
+    bool ftpFileExists(const QString &remotePath);
     bool ensureFtpConnected();
     bool waitForFtpCommand(int commandId, const QString &defaultError);
     void closeFtpAfterOperation();
@@ -55,9 +80,17 @@ private:
     bool sftpUploadFile(const QString &localPath, const QString &remotePath);
     bool sftpDownloadFile(const QString &remotePath, const QString &localPath);
     bool sftpRemoveFile(const QString &remotePath);
+    bool sftpListDirectory(const QString &remotePath, QList<FileTransferEntry> *entries);
+    bool sftpCreateDirectory(const QString &remotePath);
+    bool sftpRemoveDirectory(const QString &remotePath);
+    bool sftpRename(const QString &oldRemotePath, const QString &newRemotePath);
+    bool sftpFileExists(const QString &remotePath);
     bool runSftpFileJob(const QString &localPath, const QString &remotePath, int operation);
+    bool runSftpOperation(const QString &firstPath, const QString &secondPath, int operation,
+        QList<FileTransferEntry> *entries);
 
     QString encodeFtpString(const QString &input) const;
+    QString decodeFtpString(const QString &input) const;
     void setError(const QString &error);
     void finishOperation(bool ok);
     quint16 effectivePort() const;

@@ -7,7 +7,7 @@
 ## 功能特性
 
 - 统一 FTP/SFTP 调用接口。
-- 支持上传、下载、删除文件。
+- 支持上传、下载、删除文件，以及远程目录列表、创建、删除、重命名和存在判断。
 - 支持远程文件名编码：
   - `UTF-8`
   - `GBK`
@@ -83,8 +83,41 @@ if (!client.uploadFile("D:/test/中文.txt", "中文.txt")) {
 bool uploadFile(const QString &localPath, const QString &remotePath);
 bool downloadFile(const QString &remotePath, const QString &localPath);
 bool removeFile(const QString &remotePath);
+QList<FileTransferEntry> listDirectory(const QString &remotePath);
+bool createDirectory(const QString &remotePath);
+bool removeDirectory(const QString &remotePath);
+bool rename(const QString &oldRemotePath, const QString &newRemotePath);
+bool fileExists(const QString &remotePath);
 void close();
 QString errorString() const;
+```
+
+目录条目结构：
+
+```cpp
+struct FileTransferEntry {
+    QString name;
+    QString path;
+    bool isDirectory;
+    qint64 size; // 未提供大小时为 -1
+};
+```
+
+目录管理示例：
+
+```cpp
+if (!client.createDirectory("upload")) {
+    qWarning() << client.errorString();
+}
+
+const QList<FileTransferEntry> entries = client.listDirectory("upload");
+if (!client.errorString().isEmpty()) {
+    qWarning() << client.errorString();
+}
+
+if (client.fileExists("upload/report.txt")) {
+    client.rename("upload/report.txt", "upload/report-old.txt");
+}
 ```
 
 连接配置：
@@ -141,6 +174,8 @@ bin/filetransferclienttest.exe
 
 ```text
 filetransferclienttest <ftp|sftp> <host> <user> <password> <utf8|gbk> <local-file> <remote-file> [port] [--remove]
+filetransferclienttest manage <ftp|sftp> <host> <user> <password> <utf8|gbk> <local-file> <remote-directory> [port]
+filetransferclienttest cleanup <ftp|sftp> <host> <user> <password> <utf8|gbk> <remote-directory> [port]
 ```
 
 参数说明：
@@ -164,6 +199,18 @@ filetransferclienttest <ftp|sftp> <host> <user> <password> <utf8|gbk> <local-fil
 3. 比较下载文件和本地源文件内容是否一致。
 4. 默认保留远程文件，方便测试者到服务端确认。
 5. 如果传入 `--remove`，校验成功后删除远程文件。
+
+`manage` 模式用于回归测试 v0.2 的远程文件管理接口。它会在指定的空目录中依次执行：
+
+1. 创建目录并验证空目录列表。
+2. 上传一个中文文件名的测试文件。
+3. 列出目录并检查文件存在。
+4. 重命名文件，再次检查文件存在。
+5. 删除文件和目录。
+
+测试成功后会自动清理创建的远程目录和文件。`remote-directory` 必须是一个不存在的目录。
+
+`cleanup` 模式用于删除指定测试目录下的一级文件及目录本身，不会递归删除子目录。
 
 成功输出示例：
 
@@ -194,6 +241,14 @@ Linux 示例：
 ./bin/filetransferclienttest ftp ftp.example.com your_user your_password gbk README.md 统一封装_ftp_gbk.txt
 ./bin/filetransferclienttest sftp sftp-gbk.example.com your_user your_password gbk README.md 统一封装_sftp_gbk.txt
 ./bin/filetransferclienttest sftp sftp-utf8.example.com your_user your_password utf8 README.md 统一封装_sftp_utf8.txt
+```
+
+目录管理回归测试：
+
+```sh
+./bin/filetransferclienttest manage ftp ftp.example.com your_user your_password gbk README.md ftk_manage_ftp
+./bin/filetransferclienttest manage sftp sftp-gbk.example.com your_user your_password gbk README.md ftk_manage_sftp_gbk
+./bin/filetransferclienttest manage sftp sftp-utf8.example.com your_user your_password utf8 README.md 测试目录_sftp_utf8
 ```
 
 指定端口示例：
@@ -350,7 +405,7 @@ export LD_LIBRARY_PATH=/path/to/FileTransferKit/lib:$LD_LIBRARY_PATH
 - SFTP 适配层直接使用 `QSsh::SshConnection` 和 `QSsh::SftpChannel`。
 - FTP 文件名编码通过 `QTextCodec` 转换为目标编码字节，再以 `QString::fromLatin1()` 传给底层 `QFtp`。
 - SFTP 文件名编码通过补充后的 `setFileNameEncoding()` / `setFileNameCodecName()` 传给底层 QSftp。
-- FTP 每次操作会单独建立连接，操作完成后优雅关闭连接；异常或超时时才强制中断。
+- 同一个 `FileTransferClient` 实例会复用 FTP 已登录连接，适合连续的上传、目录列表和重命名操作；调用 `close()` 或析构时断开。异常或超时时会强制中断并在下一次操作时重连。
 - SFTP 每次操作会单独建立 SSH/SFTP 会话，操作完成后关闭连接。
 
 ## 注意事项
@@ -358,4 +413,7 @@ export LD_LIBRARY_PATH=/path/to/FileTransferKit/lib:$LD_LIBRARY_PATH
 - 如果服务端文件名编码是 GBK，测试程序和业务代码都要选择 `gbk` / `GbkFileNameEncoding`。
 - 如果服务端文件名编码是 UTF-8，选择 `utf8` / `Utf8FileNameEncoding`。
 - 远程路径是否支持中文，最终取决于服务端实际使用的文件名编码和操作系统配置。
+- `listDirectory()` 成功但目录为空时，返回空列表且 `errorString()` 为空；列表失败时也会返回空列表，但 `errorString()` 会包含错误原因。
+- `fileExists()` 通过列出父目录后匹配文件名实现，以兼容部分不支持 SFTP `LSTAT` 的服务端。
+- 某些 FTP 服务端会用 UTF-8 返回 `LIST` 结果，即使命令参数采用 GBK。本库会优先识别有效 UTF-8 列表响应，再回退到配置的文件名编码。
 - Windows 命令行显示中文可能受代码页影响，但不代表传输失败，以测试程序最终的 `OK` 结果为准。
